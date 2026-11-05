@@ -1,0 +1,33 @@
+{
+  "settings": {
+    "N": 512,
+    "TARGET": {
+      "kind": "llvm",
+      "tag": "",
+      "keys": [
+        "arm_cpu",
+        "cpu"
+      ],
+      "feature.has_fp16_simd": false,
+      "feature.has_dotprod": false,
+      "feature.has_sve": false,
+      "feature.has_sme": false,
+      "feature.has_asimd": true,
+      "feature.is_aarch64": false,
+      "mtriple": "arm64-apple-darwin27.0.0",
+      "feature.has_matmul_i8": false,
+      "num-cores": 4
+    },
+    "STRATEGY": "replay-trace",
+    "TVM_VERSION": "0.27.0.post1",
+    "MAX_TRIALS": 64,
+    "TRIALS_PER_ITER": 16,
+    "SEED": 1,
+    "REPEATS": 20,
+    "NUMBER": 10
+  },
+  "untuned_ms": 139.71178955000002,
+  "tuned_ms": 1.1039020499999999,
+  "speedup": 126.56176292996288,
+  "tuning_wall_time_seconds": 100.72449749999987
+}
