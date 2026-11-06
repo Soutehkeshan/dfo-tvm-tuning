@@ -16,3 +16,13 @@
 - **tune (Claude Code):** Claude checked my tune_tir arguments against the v0.27 source and explained which settings must stay identical across methods (space, cost model, measure callbacks). It diagnosed a missing libomp dependency for XGBoost, which I installed.
 - **End-to-end check (Claude Code):** Claude ran a small check of my benchmark (N=64, 16 trials) to confirm the pipeline works: about 31x speedup over untuned, and the result passed the correctness check.
 - **save_results and main (Claude Code):** Claude reviewed my results-saving and main block. It caught that Target.export() is not JSON-serialisable (its own earlier suggestion, so I switched to json.loads(str(TARGET))) and that WORK_DIR overwrote results across seeds. It suggested recording tuning wall-clock time. I wrote the changes.
+
+## 2026-11-05
+
+- **Extra seeds (Claude Code):** At my request, Claude ran my benchmark script for seeds 1–2 of evolutionary and replay-trace (64 trials), changing only STRATEGY and SEED, then tabulated the raw numbers and committed the results files; the analysis is my own.
+- **Budget check (Claude Code):** Claude helped verify, by reading TVM’s C++ source, that the trial budget only controls stopping; I used this to justify reading all budgets from single 512-trial runs.
+
+## 2026-11-06
+
+- **DFO package skeleton (Claude):** Claude provided a skeleton for the DFO package (module layout, function signatures, sizing to match evolutionary search’s screening budget); I wrote the implementation.
+- **Cost-model warm-up (Claude):** Claude helped trace in TVM’s source that XGBoost returns random predictions for the first 100 samples; I confirmed it through the call chain and used it to explain my 64-trial results.

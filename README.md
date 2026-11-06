@@ -7,6 +7,7 @@ Dispersive Flies Optimisation as a search strategy for Apache TVM's MetaSchedule
 
 ## Build environment
 - LLVM 23.1.4 (Homebrew)
+- libomp (Homebrew), required for TVM's parallel runtime on macOS
 - Python 3.12.11
 - macOS 27.0.1, arm64
 - Smoke test: `.venv/bin/python scripts/smoke_test.py`

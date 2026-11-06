@@ -14,7 +14,7 @@ from tvm.s_tir import meta_schedule as ms
 N = 512                                                      # matrix size (N x N)
 TARGET = tvm.target.Target({"kind": "llvm", "num-cores": 4}) # Mac CPU for now
 RUNNER = "local"                                             # later: an RPC runner pointing at the Pi
-STRATEGY = "evolutionary"                                    # search strategy under test
+STRATEGY = "evolutionary"                                    # search strategy under test (replay-trace for random search)
 MAX_TRIALS = 64                                              # total trial budget
 TRIALS_PER_ITER = 16                                         # 64 / 16 = 4 rounds of search
 SEED = 0
