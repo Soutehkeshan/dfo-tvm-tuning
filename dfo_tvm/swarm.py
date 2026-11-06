@@ -2,8 +2,6 @@
 
 Test this on a toy fitness (e.g. sphere function) before connecting it to TVM.
 """
-from operator import index
-
 import numpy as np
 
 
@@ -15,7 +13,7 @@ class FlyGroup:
         fitness   : (n_flies,) float; minimised, so lower is better
     """
 
-    def __init__(self, sketch_id, n_flies, dim, delta, rng):
+    def __init__(self, sketch_id, n_flies, dim, delta, rng, low, high):
         """Store settings; positions and fitness stay None until initialise()."""
 
         self.sketch_id = sketch_id
@@ -27,6 +25,12 @@ class FlyGroup:
             raise ValueError(f"delta must be between 0 and 1, got {delta}")
         self.delta = delta
         self.rng = rng
+        self.low = np.asarray(low, dtype=float)
+        self.high = np.asarray(high, dtype=float)
+        if self.low.shape != (self.dim,) or self.high.shape != (self.dim,):
+            raise ValueError(f"low and high must have shape {(self.dim,)}")
+        if np.any(self.low > self.high):
+            raise ValueError("Every low bound must be <= its high bound")
         self.positions = None
         self.fitness = None
 
@@ -48,7 +52,6 @@ class FlyGroup:
         if not 0 <= idx < self.n_flies:
             raise IndexError(f"Fly index out of range: {idx}")
 
-        idx = index(idx)
         left = (idx - 1) % self.n_flies
         right = (idx + 1) % self.n_flies
         left_fitness = self.fitness[left]
@@ -78,11 +81,13 @@ class FlyGroup:
 
         # Treat failed predictions as worst possible fitness for selection.
         fitness = np.where(np.isnan(self.fitness), np.inf, self.fitness)
+        if not np.isfinite(fitness).any():
+            raise RuntimeError("Cannot step before at least one fly has a finite fitness score")
         elite_idx = int(np.argmin(fitness))
         fly_indices = np.arange(self.n_flies)
-        left = (fly_indices - 1) % self.n_flies
-        right = (fly_indices + 1) % self.n_flies
-        neighbour_indices = np.where(fitness[left] <= fitness[right], left, right)
+        neighbour_indices = np.fromiter(
+            (self.best_neighbour(i) for i in fly_indices), dtype=int, count=self.n_flies
+        )
 
         new_positions = self.positions.copy()
         moving = fly_indices != elite_idx
@@ -91,12 +96,8 @@ class FlyGroup:
         u = self.rng.random(current.shape)
         moved = neighbours + u * (swarm_best - current)
 
-        # With no explicit bounds in FlyGroup, use the current group's per-dimension
-        # range for disturbance; repair_fn maps samples back into the valid domain.
-        low = np.min(self.positions, axis=0)
-        high = np.max(self.positions, axis=0)
         disturbed = self.rng.random(current.shape) < self.delta
-        random_positions = self.rng.uniform(low, high, size=current.shape)
+        random_positions = self.rng.uniform(self.low, self.high, size=current.shape)
         proposals = np.where(disturbed, random_positions, moved)
 
         repaired = np.empty_like(proposals)
@@ -109,6 +110,7 @@ class FlyGroup:
             repaired[row] = repaired_position
         new_positions[moving] = repaired
         self.positions = new_positions
+        self.fitness[moving] = np.inf
         return self.positions.copy()
 
     def best(self):
@@ -120,8 +122,9 @@ class FlyGroup:
         return self.positions[best_idx].copy(), float(fitness[best_idx])
 
     def diversity(self):
-        """Mean distance of flies to the group centroid -- log this every round.
+        """Mean Euclidean distance to the centroid across tile exponents and unroll.
 
+        This mixes tile exponents with the unroll index, which has a smaller range.
         """
         if self.positions is None:
             raise RuntimeError("FlyGroup must be initialised before measuring diversity")
@@ -130,7 +133,7 @@ class FlyGroup:
 
 
 def communicate(groups, step_count, interval):
-    """At each fixed interval, return a copy of the global best position.
+    """At each fixed interval, return the global best ``(position, fitness)``.
 
     Dr al-Rifaie's advice: groups search separately, then communicate.
 
@@ -146,16 +149,33 @@ def communicate(groups, step_count, interval):
     if step_count % interval != 0:
         return None
 
-    best_position = None
-    best_fitness = np.inf
-    expected_dim = None
-    for group in groups:
+    best_position, best_fitness = groups[0].best()
+    expected_dim = best_position.shape
+    for group in groups[1:]:
         position, fitness = group.best()
-        if expected_dim is None:
-            expected_dim = position.shape
-        elif position.shape != expected_dim:
+        if position.shape != expected_dim:
             raise ValueError("All FlyGroups must use the same position dimension")
         if fitness < best_fitness:
             best_position = position
             best_fitness = fitness
-    return best_position.copy()
+    return best_position.copy(), best_fitness
+
+
+def best_known_position(group, shared_best):
+    """Choose the better of a group's own best and the last globally shared best.
+
+    ``shared_best`` is the ``(position, fitness)`` tuple returned by communicate,
+    or None before the first communication. Local improvements stay within their
+    group until the next communication point.
+    """
+    local_position, local_fitness = group.best()
+    if shared_best is None:
+        return local_position
+
+    shared_position, shared_fitness = shared_best
+    shared_position = np.asarray(shared_position, dtype=float)
+    if shared_position.shape != (group.dim,):
+        raise ValueError(f"Expected shared best shape {(group.dim,)}, got {shared_position.shape}")
+    if local_fitness < shared_fitness:
+        return local_position
+    return shared_position.copy()
