@@ -97,7 +97,10 @@ class FlyGroup:
         moved = neighbours + u * (swarm_best - current)
 
         disturbed = self.rng.random(current.shape) < self.delta
-        random_positions = self.rng.uniform(self.low, self.high, size=current.shape)
+        random_positions = np.rint(
+            self.rng.uniform(self.low - 0.5, self.high + 0.5, size=current.shape)
+        )
+        random_positions = np.clip(random_positions, self.low, self.high)
         proposals = np.where(disturbed, random_positions, moved)
 
         repaired = np.empty_like(proposals)
