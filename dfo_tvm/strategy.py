@@ -11,6 +11,7 @@ candidates and stops the strategy.
 """
 import json
 import logging
+import time
 from pathlib import Path
 
 import numpy as np
@@ -168,12 +169,6 @@ class DFOSearch(PySearchStrategy):
 
     def _add_round_candidate(self, score, candidate, position, sketch_id):
         """Keep the highest-scoring unique candidates that have not been measured."""
-        target_count = min(self.num_trials_per_iter, self.max_trials - self.trials_done)
-        random_count = int(target_count * self.eps_greedy)
-        best_count = max(0, target_count - random_count)
-        if best_count == 0:
-            self._round_best_candidates = []
-            return
         mod = candidate.sch.mod
         if self._module_is_known(mod):
             return
@@ -271,6 +266,7 @@ class DFOSearch(PySearchStrategy):
         self.shared_best = None
         self.global_move_count = 0
         self.round_logs = []
+        self.best_latency_seconds = np.inf
         self._measured_modules = {}
         self._load_measured_modules()
 
@@ -279,10 +275,10 @@ class DFOSearch(PySearchStrategy):
         if self.trials_done >= self.max_trials:
             return None
 
+        self._round_start_time = time.perf_counter()
         target_count = min(self.num_trials_per_iter, self.max_trials - self.trials_done)
         random_count = int(target_count * self.eps_greedy)
         best_count = target_count - random_count
-        self.shared_best = None
         self._round_failure_stats = {"count": 0, "first_error": None}
         self._round_candidate_pool = []
         self._round_candidate_modules = {}
@@ -336,8 +332,14 @@ class DFOSearch(PySearchStrategy):
             "diversity_by_group": [group.diversity() for group in self.groups],
             "replay_failures": self._round_failure_stats["count"],
             "first_replay_error": self._round_failure_stats["first_error"],
+            "candidate_generation_seconds": time.perf_counter() - self._round_start_time,
         })
-        return selected or None
+        if not selected:
+            raise RuntimeError(
+                f"DFO selected no candidates in round {len(self.round_logs)} "
+                f"with {self.trials_done}/{self.max_trials} trials done"
+            )
+        return selected
 
     def notify_runner_results(self, measure_candidates, results):
         """Count completed trials and record measured modules.
@@ -350,8 +352,25 @@ class DFOSearch(PySearchStrategy):
                 f"Received {len(results)} runner results for {len(measure_candidates)} candidates"
             )
         self.trials_done += len(results)
-        for candidate in measure_candidates:
+        round_best = np.inf
+        for candidate, result in zip(measure_candidates, results):
             self._remember_module(candidate.sch.mod)
+            if result.error_msg is None and result.run_secs:
+                run_secs = np.asarray(result.run_secs, dtype=float)
+                run_secs = run_secs[np.isfinite(run_secs) & (run_secs > 0)]
+                if run_secs.size:
+                    round_best = min(round_best, float(np.median(run_secs)))
+        if round_best < np.inf:
+            self.best_latency_seconds = min(self.best_latency_seconds, round_best)
+        if self.round_logs:
+            round_log = self.round_logs[-1]
+            round_log["best_round_latency_ms"] = (
+                None if round_best == np.inf else round_best * 1000
+            )
+            round_log["best_latency_so_far_ms"] = (
+                None if self.best_latency_seconds == np.inf else self.best_latency_seconds * 1000
+            )
+            round_log["round_wall_time_seconds"] = time.perf_counter() - self._round_start_time
 
     def post_tuning(self):
         """Write per-round summaries to the configured file and MetaSchedule logs."""
