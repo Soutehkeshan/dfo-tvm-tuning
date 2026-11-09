@@ -26,3 +26,10 @@
 
 - **DFO package skeleton (Claude):** Claude provided a skeleton for the DFO package (module layout, function signatures, sizing to match evolutionary search’s screening budget); I wrote the implementation.
 - **Cost-model warm-up (Claude):** Claude helped trace in TVM’s source that XGBoost returns random predictions for the first 100 samples; I confirmed it through the call chain and used it to explain my 64-trial results.
+- **Sphere test (Claude Code):** Claude ran a throwaway shifted-sphere sanity test of my swarm.py (5 seeds): converged to ~1e-8 vs random ~0.6, best-so-far monotone, diversity didn't collapse.
+- **Rastrigin test (Claude Code):** Claude ran a throwaway Rastrigin test of my swarm.py sweeping δ (10 seeds): δ=0 stalls in local minima with zero diversity; δ≈0.01–0.05 reached the global basin in 10/10.
+
+## 2026-11-09
+
+- **derived_object check (Claude Code):** Claude confirmed @derived_object is still required in TVM v0.27 (a plain PySearchStrategy subclass raises 'Unknown SearchStrategy') and that it now lives in tvm.ir.utils.
+- **eps_greedy check (Claude):** Claude helped me trace in TVM’s C++ source that EvolutionarySearch’s eps_greedy truncates to 0 random picks at 16 trials per round; I matched DFO to it.
