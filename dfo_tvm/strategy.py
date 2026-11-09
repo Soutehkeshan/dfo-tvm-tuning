@@ -308,6 +308,7 @@ class DFOSearch(PySearchStrategy):
         for entry in self._round_best_candidates:
             if self._remember_module(entry["mod"]):
                 selected.append(entry["candidate"])
+        swarm_chosen = len(selected)
 
         attempts = 0
         max_attempts = max(100, (target_count - len(selected)) * 100)
@@ -323,15 +324,10 @@ class DFOSearch(PySearchStrategy):
         best_score = max(
             (entry["score"] for entry in self._round_best_candidates), default=None
         )
-        swarm_chosen = len(selected)
-        random_filled = 0
-        # The top-ranked count is determined by the number of unique candidates
-        # available before the random top-up began.
-        swarm_chosen = min(best_count, len(self._round_best_candidates), len(selected))
         random_filled = len(selected) - swarm_chosen
         self.round_logs.append({
             "round": len(self.round_logs) + 1,
-            "trials_done": self.trials_done,
+            "trials_completed_before_round": self.trials_done,
             "trials_submitted": len(selected),
             "swarm_chosen": swarm_chosen,
             "random_filled": random_filled,
