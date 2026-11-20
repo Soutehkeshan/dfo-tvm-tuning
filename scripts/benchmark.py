@@ -26,6 +26,7 @@ from tvm.s_tir import meta_schedule as ms
 REPO_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_DIR))
 from dfo_tvm.encoding import describe_space  # noqa: E402
+from dfo_tvm import strategy as dfo  # noqa: E402
 
 # macOS tar adds AppleDouble ._* members that break linking the archive on the Nano.
 # Set before any builder worker starts so the workers inherit it.
@@ -40,10 +41,13 @@ HOST_TAG = "jetson"
 TARGET = tvm.target.Target(
     {"kind": "llvm", "mtriple": "aarch64-linux-gnu", "mcpu": "cortex-a57", "num-cores": 4}
 )
-STRATEGY = "evolutionary"                                    # search strategy under test (replay-trace for random search)
+STRATEGIES = ("evolutionary", "dfo", "replay-trace")         # replay-trace is random search
+STRATEGY = "evolutionary"                                    # default; override with --strategy
 MAX_TRIALS = 64                                              # default trial budget; override with --trials
 TRIALS_PER_ITER = 16                                         # 16 trials per round of search
-SEED = 0
+SEED = 0                                                     # default tuning seed; override with --seed
+DATA_SEED = 0                                                # matmul inputs for final timings, fixed across runs
+DFO_DELTA = dfo.DELTA                                        # DFO disturbance threshold; override with --delta
 REPEATS = 20                                                 # number of timing samples; result uses their median
 NUMBER = 10                                                  # runs averaged within each timing sample
 
@@ -157,7 +161,7 @@ def time_module(lib, n):
         mod = session.load_module(archive.name)
 
     to_dev = getattr(tvm.runtime, "tensor", None) or tvm.nd.array
-    rng = np.random.default_rng(SEED)
+    rng = np.random.default_rng(DATA_SEED)
     a_np = rng.random((n, n), dtype=np.float32)
     b_np = rng.random((n, n), dtype=np.float32)
     a, b = to_dev(a_np, dev), to_dev(b_np, dev)
@@ -180,8 +184,22 @@ def time_untuned(func):
     return time_module(lib, N)
 
 
-def tune(func, work_dir, max_trials):
-    """Run MetaSchedule with the configured search strategy and return the database."""
+def make_strategy(strategy, delta, work_dir):
+    """Return the strategy for tune_tir; DFO writes its round logs into the run directory."""
+
+    if strategy == "dfo":
+        return dfo.DFOSearch(delta=delta, log_path=work_dir / "dfo_rounds.json")
+    return strategy
+
+
+def run_label(strategy, delta):
+    if strategy == "dfo" and delta != DFO_DELTA:
+        return f"dfo-d{delta:g}"
+    return strategy
+
+
+def tune(func, work_dir, max_trials, strategy, seed, delta):
+    """Run MetaSchedule with the given search strategy and return the database."""
 
     return ms.tune_tir(
         mod=func,
@@ -192,10 +210,10 @@ def tune(func, work_dir, max_trials):
         runner=ms.runner.RPCRunner(
             rpc_config=RPC_CONFIG, evaluator_config=EVALUATOR_CONFIG, max_workers=1
         ),
-        seed=SEED,
+        seed=seed,
         space=make_space(),
         cost_model="xgb",
-        strategy=STRATEGY,
+        strategy=make_strategy(strategy, delta, work_dir),
         builder=ms.builder.LocalBuilder(),                   # cross-compiles for aarch64, exports a .tar
         database="json",
     )
@@ -311,7 +329,7 @@ def provenance():
     }
 
 
-def save_results(results, results_path, max_trials):
+def save_results(results, results_path, max_trials, strategy, seed, delta):
     """Write settings and measured runtimes to the tracked results directory.
 
     ``results`` should contain the untuned_ms, tuned_ms, and speedup values.
@@ -324,11 +342,12 @@ def save_results(results, results_path, max_trials):
             "HOST": HOST,
             "TARGET": json.loads(str(TARGET)),
             "TARGET_STR": str(TARGET),
-            "STRATEGY": STRATEGY,
+            "STRATEGY": strategy,
             "TVM_VERSION": tvm.__version__,
             "MAX_TRIALS": max_trials,
             "TRIALS_PER_ITER": TRIALS_PER_ITER,
-            "SEED": SEED,
+            "SEED": seed,
+            "DATA_SEED": DATA_SEED,
             "REPEATS": REPEATS,
             "NUMBER": NUMBER,
             "SPACE": {"kind": "post-order-apply", **SPACE_SETTINGS},
@@ -338,6 +357,14 @@ def save_results(results, results_path, max_trials):
         },
         **results,
     }
+    if strategy == "dfo":
+        data["settings"]["DFO"] = {
+            "delta": delta,
+            "n_flies": dfo.N_FLIES_PER_GROUP,
+            "moves": dfo.MOVES_PER_ROUND,
+            "comm_interval": dfo.COMM_INTERVAL,
+            "eps_greedy": dfo.EPS_GREEDY,
+        }
     with results_path.open("w", encoding="utf-8") as result_file:
         json.dump(data, result_file, indent=2)
         result_file.write("\n")
@@ -346,14 +373,22 @@ def save_results(results, results_path, max_trials):
 
 if __name__ == "__main__":  # required on macOS: the builder spawns processes
     parser = argparse.ArgumentParser()
+    parser.add_argument("--strategy", choices=STRATEGIES, default=STRATEGY)
     parser.add_argument("--trials", type=int, default=MAX_TRIALS, help="total trial budget")
-    max_trials = parser.parse_args().trials
-    run_name = f"{STRATEGY}_n{N}_t{max_trials}_s{SEED}"
-    work_dir = REPO_DIR / "logs/raw" / HOST_TAG / run_name
-    results_path = REPO_DIR / "results" / HOST_TAG / f"{run_name}.json"
-    if work_dir.exists():
+    parser.add_argument("--seed", type=int, default=SEED, help="tuning seed")
+    parser.add_argument("--delta", type=float, default=DFO_DELTA, help="DFO disturbance threshold")
+    parser.add_argument("--output-root", type=Path, default=REPO_DIR,
+                        help="folder that receives results/ and logs/raw/ (default: the repo)")
+    args = parser.parse_args()
+    if args.strategy != "dfo" and args.delta != DFO_DELTA:
+        raise SystemExit("--delta applies only to --strategy dfo")
+    max_trials = args.trials
+    run_name = f"{run_label(args.strategy, args.delta)}_n{N}_t{max_trials}_s{args.seed}"
+    work_dir = args.output_root / "logs/raw" / HOST_TAG / run_name
+    results_path = args.output_root / "results" / HOST_TAG / f"{run_name}.json"
+    if work_dir.exists() or results_path.exists():
         raise SystemExit(
-            f"Tuning directory already exists: {work_dir}. "
+            f"Run already exists: {work_dir} or {results_path}. "
             "Delete it or change the settings before running again."
         )
 
@@ -365,7 +400,7 @@ if __name__ == "__main__":  # required on macOS: the builder spawns processes
 
     untuned_ms = time_untuned(func)
     tuning_start = time.perf_counter()
-    database = tune(func, work_dir, max_trials)
+    database = tune(func, work_dir, max_trials, args.strategy, args.seed, args.delta)
     tuning_wall_time_seconds = time.perf_counter() - tuning_start
     tuned_ms = time_tuned(database, func, work_dir)
     speedup = untuned_ms / tuned_ms
@@ -387,7 +422,7 @@ if __name__ == "__main__":  # required on macOS: the builder spawns processes
             "after": state_after,
             "frequency_residency": residency,
         },
-    }, results_path, max_trials)
+    }, results_path, max_trials, args.strategy, args.seed, args.delta)
     print(f"Results saved to {results_path}")
     check_device(state_after, "after the run")
     if any(policy["fraction_at_max"] != 1.0 for policy in residency.values()):
