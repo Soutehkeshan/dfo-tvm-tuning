@@ -68,6 +68,7 @@ RPC_CONFIG = ms.runner.RPCConfig(
     session_timeout_sec=60,
 )
 TIMING_SESSION_TIMEOUT_SEC = 1800                            # time_module sessions: untuned runs are slow
+BUILDER_TIMEOUT_SEC = 120                                    # per-candidate build limit on the Mac
 NANO_TVM_PYTHON = os.environ.get("JETSON_TVM_PYTHON", "~/.local/envs/tvm-rpc/bin/python")
 MAX_KHZ = 1479000                                            # MAXN + jetson_clocks: 4 cores pinned here
 NUM_CORES = 4
@@ -214,7 +215,7 @@ def tune(func, work_dir, max_trials, strategy, seed, delta):
         space=make_space(),
         cost_model="xgb",
         strategy=make_strategy(strategy, delta, work_dir),
-        builder=ms.builder.LocalBuilder(),                   # cross-compiles for aarch64, exports a .tar
+        builder=ms.builder.LocalBuilder(timeout_sec=BUILDER_TIMEOUT_SEC),  # cross-compiles, exports a .tar
         database="json",
     )
 
@@ -354,6 +355,7 @@ def save_results(results, results_path, max_trials, strategy, seed, delta):
             "EVALUATOR_CONFIG": EVALUATOR_CONFIG._asdict(),
             "RPC_CONFIG": RPC_CONFIG._asdict(),
             "TIMING_SESSION_TIMEOUT_SEC": TIMING_SESSION_TIMEOUT_SEC,
+            "BUILDER_TIMEOUT_SEC": BUILDER_TIMEOUT_SEC,
         },
         **results,
     }
