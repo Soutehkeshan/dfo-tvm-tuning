@@ -1,7 +1,4 @@
-"""Pure DFO on NumPy arrays: no TVM imports.
-
-Test this on a toy fitness (e.g. sphere function) before connecting it to TVM.
-"""
+"""Pure DFO on NumPy arrays: no TVM imports."""
 import numpy as np
 
 
@@ -138,7 +135,7 @@ class FlyGroup:
 def communicate(groups, step_count, interval):
     """At each fixed interval, return the global best ``(position, fitness)``.
 
-    Dr al-Rifaie's advice: groups search separately, then communicate.
+    Groups search separately and share their best only at these points.
 
     Returns None between communication points so callers can retain the last shared
     best. Positions transfer directly because every sketch uses the same encoding.

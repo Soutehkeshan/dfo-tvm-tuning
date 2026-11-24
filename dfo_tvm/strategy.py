@@ -1,8 +1,7 @@
 """Dispersive Flies Optimisation as a TVM MetaSchedule search strategy.
 
-Sizing (to match EvolutionarySearch's screening effort, ~512 x 4 = 2048 cost-model
-predictions per round):
-    3 groups x 64 flies x 10 moves/round = 1920 predictions/round
+Sizing: 3 groups x 64 flies x 10 moves = 1920 cost-model predictions per round.
+EvolutionarySearch scores its population of 512 five times per round (2560).
 At 16 trials per round, int(16 * 0.05) truncates to zero random picks, matching
 EvolutionarySearch. Random positions only top up the round if DFO finds too few new
 candidates.
