@@ -1,7 +1,10 @@
 """Dispersive Flies Optimisation as a TVM MetaSchedule search strategy.
 
-Sizing: 3 groups x 64 flies x 10 moves = 1920 cost-model predictions per round.
-EvolutionarySearch scores its population of 512 five times per round (2560).
+Sizing: 256 flies x 10 moves = 2560 cost-model predictions per round, the same as
+EvolutionarySearch, which scores its population of 512 five times per round.
+The flies are shared between the sketches, one group each. After every round, flies
+move towards the groups whose predictions most often reach the round's top 10%; each
+group keeps at least 16 flies.
 At 16 trials per round, int(16 * 0.05) truncates to zero random picks, matching
 EvolutionarySearch. Random positions only top up the round if DFO finds too few new
 candidates.
@@ -21,9 +24,11 @@ from tvm.ir.utils import derived_object
 from tvm.s_tir.meta_schedule.search_strategy import MeasureCandidate, PySearchStrategy
 from . import encoding, swarm
 
-N_FLIES_PER_GROUP = 64
+N_FLIES = 256               # total over all groups
+MIN_FLIES_PER_GROUP = 16
+TOP_FRACTION = 0.1          # share of a round's predictions that counts as a hit
 MOVES_PER_ROUND = 10        # cost-model-scored DFO steps between real measurements
-DELTA = 0.001               # disturbance threshold: a parameter to tune and report
+DELTA = 0.05                # disturbance threshold
 COMM_INTERVAL = 5           # moves between group communication (fixed, budget-free)
 EPS_GREEDY = 0.05
 
@@ -60,12 +65,14 @@ def replay_with_postprocs(mod, trace, postprocs, seed=None, failure_stats=None):
 class DFOSearch(PySearchStrategy):
     """Dispersive Flies Optimisation over MetaSchedule decisions, one fly group per sketch."""
 
-    def __init__(self, n_flies=N_FLIES_PER_GROUP, moves=MOVES_PER_ROUND,
+    def __init__(self, n_flies=N_FLIES, moves=MOVES_PER_ROUND,
                  delta=DELTA, comm_interval=COMM_INTERVAL, eps_greedy=EPS_GREEDY,
-                 log_path=None):
+                 min_flies=MIN_FLIES_PER_GROUP, top_fraction=TOP_FRACTION, log_path=None):
         """Store DFO settings; MetaSchedule resources are attached later."""
-        if n_flies < 3:
-            raise ValueError(f"n_flies must be >= 3, got {n_flies}")
+        if min_flies < 3 or n_flies < 3 * min_flies:
+            raise ValueError(f"need min_flies >= 3 and n_flies >= 3 * min_flies, got {n_flies}, {min_flies}")
+        if not 0 < top_fraction < 1:
+            raise ValueError(f"top_fraction must be between 0 and 1, got {top_fraction}")
         if moves < 1:
             raise ValueError(f"moves must be positive, got {moves}")
         if comm_interval < 1:
@@ -79,6 +86,8 @@ class DFOSearch(PySearchStrategy):
         self.delta = delta
         self.comm_interval = comm_interval
         self.eps_greedy = eps_greedy
+        self.min_flies = min_flies
+        self.top_fraction = top_fraction
         self.log_path = None if log_path is None else str(log_path)
 
     def _initialize_with_tune_context(self, context):
@@ -149,6 +158,7 @@ class DFOSearch(PySearchStrategy):
 
         if not candidates:
             return 0
+        self._round_predictions += len(candidates)
         scores = np.asarray(self.cost_model.predict(self.context, candidates), dtype=float).reshape(-1)
         if scores.size != len(candidates):
             raise RuntimeError(
@@ -158,6 +168,7 @@ class DFOSearch(PySearchStrategy):
         valid_count = 0
         for candidate, owner, score in zip(candidates, owners, scores):
             sketch_id, fly_idx, position = owner
+            self._round_scores.append((float(score), sketch_id))
             if np.isfinite(score):
                 self.groups[sketch_id].fitness[fly_idx] = -float(score)
                 self._add_round_candidate(float(score), candidate, position, sketch_id)
@@ -192,7 +203,7 @@ class DFOSearch(PySearchStrategy):
             if not np.isfinite(fitness).any():
                 layout = self.layouts[sketch_id]
                 group.initialise(np.asarray(
-                    [encoding.random_position(self.rng, layout) for _ in range(self.n_flies)],
+                    [encoding.random_position(self.rng, layout) for _ in range(group.n_flies)],
                     dtype=float,
                 ))
                 continue
@@ -244,16 +255,18 @@ class DFOSearch(PySearchStrategy):
         rng_sequences = seed_sequence.spawn(len(self.layouts) + 1)
         self.rng = np.random.default_rng(rng_sequences[0])
         self.groups = []
+        sizes = [self.n_flies // len(self.layouts)] * len(self.layouts)
+        sizes[0] += self.n_flies - sum(sizes)
         for sketch_id, (layout, rng_sequence) in enumerate(zip(self.layouts, rng_sequences[1:])):
             group_rng = np.random.default_rng(rng_sequence)
             low, high = encoding.position_bounds(layout)
             initial_positions = np.asarray(
-                [encoding.random_position(group_rng, layout) for _ in range(self.n_flies)],
+                [encoding.random_position(group_rng, layout) for _ in range(sizes[sketch_id])],
                 dtype=float,
             )
             group = swarm.FlyGroup(
                 sketch_id=sketch_id,
-                n_flies=self.n_flies,
+                n_flies=sizes[sketch_id],
                 dim=layout["dim"],
                 delta=self.delta,
                 rng=group_rng,
@@ -281,6 +294,9 @@ class DFOSearch(PySearchStrategy):
         self._round_failure_stats = {"count": 0, "first_error": None}
         self._round_candidate_pool = []
         self._round_candidate_modules = {}
+        self._round_predictions = 0
+        self._round_scores = []
+        flies_by_group = [group.n_flies for group in self.groups]
         self._score_groups()
         moves_left = self.moves - 1
 
@@ -293,6 +309,14 @@ class DFOSearch(PySearchStrategy):
             )
             if shared_best is not None:
                 self.shared_best = shared_best
+
+        expected = self.n_flies * self.moves
+        if self._round_predictions != expected:
+            raise RuntimeError(
+                f"Round {len(self.round_logs) + 1} made {self._round_predictions} cost-model "
+                f"predictions instead of {expected}"
+            )
+        hit_rates = self._hit_rates()
 
         self._round_best_candidates = sorted(
             self._round_candidate_pool,
@@ -329,6 +353,9 @@ class DFOSearch(PySearchStrategy):
             "underfilled": max(0, target_count - len(selected)),
             "best_predicted_score": best_score,
             "diversity_by_group": [group.diversity() for group in self.groups],
+            "predictions": self._round_predictions,
+            "flies_by_group": flies_by_group,
+            "hit_rate_by_group": hit_rates,
             "replay_failures": self._round_failure_stats["count"],
             "first_replay_error": self._round_failure_stats["first_error"],
             "candidate_generation_seconds": time.perf_counter() - self._round_start_time,
@@ -338,7 +365,34 @@ class DFOSearch(PySearchStrategy):
                 f"DFO selected no candidates in round {len(self.round_logs)} "
                 f"with {self.trials_done}/{self.max_trials} trials done"
             )
+        self._reallocate(hit_rates)
         return selected
+
+    def _hit_rates(self):
+        """Per group: share of this round's predictions that reached the round's top fraction."""
+        scores = np.array([score for score, _ in self._round_scores])
+        owners = np.array([sketch_id for _, sketch_id in self._round_scores])
+        finite = np.isfinite(scores)
+        if not finite.any():
+            return [0.0] * len(self.groups)
+        threshold = np.quantile(scores[finite], 1 - self.top_fraction)
+        rates = []
+        for sketch_id in range(len(self.groups)):
+            mine = owners == sketch_id
+            hits = np.count_nonzero(mine & finite & (scores >= threshold))
+            rates.append(hits / max(1, np.count_nonzero(mine)))
+        return rates
+
+    def _reallocate(self, hit_rates):
+        """Move flies between groups for the next round; new flies start at random positions."""
+        current = [group.n_flies for group in self.groups]
+        sizes = swarm.allocate(current, hit_rates, self.n_flies, self.min_flies)
+        for sketch_id, (group, size) in enumerate(zip(self.groups, sizes)):
+            new_positions = [
+                encoding.random_position(self.rng, self.layouts[sketch_id])
+                for _ in range(max(0, int(size) - group.n_flies))
+            ]
+            group.resize(int(size), new_positions)
 
     def notify_runner_results(self, measure_candidates, results):
         """Count completed trials and record measured modules.
@@ -391,5 +445,7 @@ class DFOSearch(PySearchStrategy):
             delta=self.delta,
             comm_interval=self.comm_interval,
             eps_greedy=self.eps_greedy,
+            min_flies=self.min_flies,
+            top_fraction=self.top_fraction,
             log_path=self.log_path,
         )

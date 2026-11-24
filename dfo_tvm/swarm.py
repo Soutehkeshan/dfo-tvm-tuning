@@ -113,6 +113,27 @@ class FlyGroup:
         self.fitness[moving] = np.inf
         return self.positions.copy()
 
+    def resize(self, n_flies, new_positions):
+        """Change the group size, keeping fly order on the ring.
+
+        Shrinking drops the worst-scored flies; the elite always stays. Growing appends
+        ``new_positions`` as unscored flies.
+        """
+        if n_flies < 3:
+            raise ValueError(f"n_flies must be >= 3, got {n_flies}")
+        if n_flies < self.n_flies:
+            fitness = np.where(np.isnan(self.fitness), np.inf, self.fitness)
+            keep = np.sort(np.argsort(fitness, kind="stable")[:n_flies])
+            self.positions = self.positions[keep]
+            self.fitness = self.fitness[keep]
+        elif n_flies > self.n_flies:
+            added = np.asarray(new_positions, dtype=float)
+            if added.shape != (n_flies - self.n_flies, self.dim):
+                raise ValueError(f"Expected {(n_flies - self.n_flies, self.dim)} new positions, got {added.shape}")
+            self.positions = np.vstack([self.positions, added])
+            self.fitness = np.concatenate([self.fitness, np.full(len(added), np.inf)])
+        self.n_flies = n_flies
+
     def best(self):
         """Return a copy of the best position and its minimised fitness."""
         if self.positions is None or self.fitness is None:
@@ -179,3 +200,25 @@ def best_known_position(group, shared_best):
     if local_fitness < shared_fitness:
         return local_position
     return shared_position.copy()
+
+
+def allocate(current, hit_rates, total, floor):
+    """Share ``total`` flies between groups by how often each group's flies scored well.
+
+    ``hit_rates[g]`` is the fraction of group g's predictions that landed in the round's
+    top predictions. Each group keeps at least ``floor`` flies; the rest is split in
+    proportion to the hit rates. Sizes move halfway from ``current`` towards that target,
+    so one noisy round cannot empty a group.
+    """
+    current = np.asarray(current, dtype=float)
+    rates = np.asarray(hit_rates, dtype=float)
+    if current.sum() != total or floor * len(current) > total:
+        raise ValueError("current sizes must sum to total, and the floors must fit")
+    spare = total - floor * len(current)
+    weights = rates / rates.sum() if rates.sum() > 0 else np.full(len(rates), 1 / len(rates))
+    target = floor + spare * weights
+    wanted = 0.5 * (current + target)
+    sizes = np.floor(wanted).astype(int)
+    for idx in np.argsort(sizes - wanted)[: total - sizes.sum()]:
+        sizes[idx] += 1
+    return sizes
