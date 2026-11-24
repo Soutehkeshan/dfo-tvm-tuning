@@ -9,7 +9,6 @@ stopped re-timing can be restarted with the same command.
 import datetime as dt
 import json
 import statistics
-import subprocess
 import sys
 import time
 import traceback
@@ -18,7 +17,6 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 import benchmark as bm  # noqa: E402
-from tvm import rpc  # noqa: E402
 from tvm.s_tir import meta_schedule as ms  # noqa: E402
 
 CHECKPOINTS = (112, 256, 512, 768, 1024)
@@ -40,41 +38,6 @@ def write_new(path, data):
     if path.exists():
         raise SystemExit(f"Refusing to overwrite {path}")
     path.write_text(json.dumps(data, indent=2) + "\n")
-
-
-def rpc_ok():
-    try:
-        tracker = rpc.connect_tracker(bm.RPC_CONFIG.tracker_host, bm.RPC_CONFIG.tracker_port)
-        remote = tracker.request(bm.RPC_CONFIG.tracker_key, priority=1, session_timeout=60)
-        exists = remote.cpu(0).exist
-        del remote
-        return bool(exists), None
-    except Exception as error:  # noqa: BLE001
-        return False, repr(error)
-
-
-def clocks_ok(state):
-    online = [c for c in state["cpus"].values() if c["online"] == "1"]
-    return len(online) == bm.NUM_CORES and all(
-        int(c[k]) == bm.MAX_KHZ for c in online for k in ("min_khz", "cur_khz", "max_khz")
-    ) and "MAXN" in state["nvpmodel_q"]
-
-
-def checked_state(when):
-    """Device probe between timings; re-applies jetson_clocks once, stops if still wrong."""
-
-    ok, error = rpc_ok()
-    if not ok:
-        raise SystemExit(f"RPC unreachable {when}: {error}")
-    state = bm.device_state()
-    if not clocks_ok(state):
-        log(f"clocks or cores wrong {when}, re-applying jetson_clocks once")
-        fix = subprocess.run(["ssh", "-o", "BatchMode=yes", bm.ssh_target(), "sudo", "-n", "jetson_clocks"],
-                             capture_output=True, text=True, timeout=60)
-        state = bm.device_state()
-        if fix.returncode != 0 or not clocks_ok(state):
-            raise SystemExit(f"clocks or cores still wrong {when}: {fix.returncode} {fix.stderr.strip()}")
-    return state
 
 
 def checkpoint_records(work_dir):
@@ -113,12 +76,12 @@ def time_untuned_block(func, label, count):
     if path.exists():
         log(f"untuned {label}: exists, skipping")
         return
-    before = checked_state(f"before untuned {label}")
+    before = bm.checked_state(f"before untuned {label}")
     values = []
     for i in range(count):
         values.append(bm.time_untuned(func))
         log(f"untuned {label} {i + 1}/{count}: {values[-1]:.1f} ms")
-    after = checked_state(f"after untuned {label}")
+    after = bm.checked_state(f"after untuned {label}")
     write_new(path, {"untuned_ms": values, "start_or_end": label, "time": now(),
                      "device": {"before": before, "after": after,
                                 "frequency_residency": bm.frequency_residency(before, after)}})
@@ -152,7 +115,7 @@ def main():
             continue
         work_dir = RAW / name
         original = json.loads((RESULTS / f"{name}.json").read_text())
-        before = checked_state(f"before {name}")
+        before = bm.checked_state(f"before {name}")
         t0 = time.monotonic()
         retimed, cache = {}, {}
         for k, (trial, db_ms, record) in checkpoint_records(work_dir).items():
@@ -161,14 +124,14 @@ def main():
                 try:
                     cache[trial] = {"retimed_ms": bm.time_module(build_record(func, work_dir, record), bm.N)}
                 except Exception as error:  # noqa: BLE001
-                    ok, rpc_error = rpc_ok()
+                    ok, rpc_error = bm.rpc_ok()
                     if not ok:
                         raise SystemExit(f"RPC unreachable during {name}: {rpc_error}") from error
                     cache[trial] = {"error": traceback.format_exc(limit=3)}
                     failed.append((name, k))
             entry.update(cache[trial])
             retimed[str(k)] = entry
-        after = checked_state(f"after {name}")
+        after = bm.checked_state(f"after {name}")
         residency = bm.frequency_residency(before, after)
         write_new(path, {
             "run": name, "time": now(), "wall_seconds": round(time.monotonic() - t0, 1),

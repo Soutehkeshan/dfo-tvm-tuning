@@ -1,8 +1,10 @@
-"""Run the Jetson tuning queue one run at a time, with per-run device checks.
+"""Run a queue of Jetson tuning runs one at a time, with per-run device checks.
 
-The queue lists every run in results/jetson. Finished runs are skipped, so the
-same command resumes a stopped queue.
+Strategies alternate within each seed, so slow drift on the device hits both alike:
+    python scripts/run_queue.py --seeds 0-9 --delta 0.05
+Finished runs are skipped, so the same command resumes a stopped queue.
 """
+import argparse
 import datetime as dt
 import json
 import re
@@ -15,26 +17,23 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
-sys.path.insert(0, str(REPO))
 import benchmark as bm  # noqa: E402
-from tvm import rpc  # noqa: E402
 
 PY = sys.executable
 RAW = REPO / "logs/raw/jetson"
 QUEUE_LOG = RAW / "queue_log.jsonl"
 STDOUT_DIR = RAW / "queue_stdout"
-TRIALS = 1024
 UNTUNED_LO, UNTUNED_HI = 815 * 0.95, 840 * 1.05
 
-queue = [("evolutionary", 0, None), ("dfo", 0, None)]
-for s in range(1, 10):
-    queue += [("evolutionary", s, None), ("dfo", s, None)]
-queue += [("replay-trace", s, None) for s in range(5)]
-queue += [("dfo", s, d) for d in (0.01, 0.05) for s in range(3)]
-for s in range(10, 20):
-    queue += [("evolutionary", s, None), ("dfo", s, None)]
-queue += [("dfo", s, d) for d in (0.01, 0.05) for s in range(3, 10)]
-queue += [("dfo", s, 0.1) for s in range(3)]
+
+def parse_seeds(text):
+    """Accept "0-9", "3,5,7" or a mix such as "0-4,10"."""
+
+    seeds = []
+    for part in text.split(","):
+        low, _, high = part.partition("-")
+        seeds += range(int(low), int(high or low) + 1)
+    return seeds
 
 
 def now():
@@ -45,8 +44,8 @@ def log(msg):
     print(f"[{now()}] {msg}", flush=True)
 
 
-def run_name(strategy, seed, delta):
-    return f"{bm.run_label(strategy, bm.DFO_DELTA if delta is None else delta)}_n{bm.N}_t{TRIALS}_s{seed}"
+def run_name(strategy, seed, delta, trials):
+    return f"{bm.run_label(strategy, delta)}_n{bm.N}_t{trials}_s{seed}"
 
 
 def battery():
@@ -56,27 +55,9 @@ def battery():
             "state": m.group(2).strip() if m else None, "ac": "AC Power" in out}
 
 
-def clocks_ok(state):
-    online = [c for c in state["cpus"].values() if c["online"] == "1"]
-    return len(online) == bm.NUM_CORES and all(
-        int(c[k]) == bm.MAX_KHZ for c in online for k in ("min_khz", "cur_khz", "max_khz")
-    ) and "MAXN" in state["nvpmodel_q"]
-
-
 def temperature(state):
     line = (state.get("tegrastats") or [""])[0]
     return dict(re.findall(r"(\w+)@([\d.]+)C", line))
-
-
-def rpc_ok():
-    try:
-        tracker = rpc.connect_tracker(bm.RPC_CONFIG.tracker_host, bm.RPC_CONFIG.tracker_port)
-        remote = tracker.request(bm.RPC_CONFIG.tracker_key, priority=1, session_timeout=60)
-        exists = remote.cpu(0).exist
-        del remote
-        return bool(exists), None
-    except Exception as error:  # noqa: BLE001
-        return False, repr(error)
 
 
 def run_stats(work_dir):
@@ -118,11 +99,20 @@ def run_stats(work_dir):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--strategies", nargs="+", choices=bm.STRATEGIES, default=list(bm.STRATEGIES))
+    parser.add_argument("--seeds", type=parse_seeds, required=True, help='e.g. "0-9" or "0,2,5"')
+    parser.add_argument("--delta", type=float, default=bm.DFO_DELTA, help="DFO disturbance threshold")
+    parser.add_argument("--trials", type=int, default=1024)
+    args = parser.parse_args()
+    queue = [(strategy, seed, args.delta if strategy == "dfo" else bm.DFO_DELTA)
+             for seed in args.seeds for strategy in args.strategies]
+
     STDOUT_DIR.mkdir(parents=True, exist_ok=True)
     skipped, stop_reason, prev_batt = [], None, None
     log(f"queue of {len(queue)} runs")
     for index, (strategy, seed, delta) in enumerate(queue):
-        name = run_name(strategy, seed, delta)
+        name = run_name(strategy, seed, delta, args.trials)
         work_dir = RAW / name
         result_path = REPO / "results/jetson" / f"{name}.json"
         entry = {"run": name, "index": index}
@@ -144,29 +134,16 @@ def main():
             break
         prev_batt = batt["percent"]
 
-        ok, error = rpc_ok()
-        if not ok:
-            stop_reason = f"RPC unreachable before {name}: {error}"
-            break
         try:
-            state = bm.device_state()
-        except Exception as error:  # noqa: BLE001
-            stop_reason = f"device probe failed before {name}: {error!r}"
+            state = bm.checked_state(f"before {name}")
+        except (SystemExit, Exception) as error:  # noqa: BLE001
+            stop_reason = str(error)
             break
         entry["temperature_start_c"] = temperature(state)
-        if not clocks_ok(state):
-            log(f"{name}: clocks or cores wrong, re-applying jetson_clocks once")
-            fix = subprocess.run(["ssh", "-o", "BatchMode=yes", bm.ssh_target(), "sudo", "-n", "jetson_clocks"],
-                                 capture_output=True, text=True, timeout=60)
-            state = bm.device_state()
-            entry["jetson_clocks_reapplied"] = {"returncode": fix.returncode, "stderr": fix.stderr.strip()}
-            if fix.returncode != 0 or not clocks_ok(state):
-                stop_reason = f"clocks or cores still wrong before {name}: {entry['jetson_clocks_reapplied']}"
-                break
 
         cmd = [PY, str(REPO / "scripts/benchmark.py"), "--strategy", strategy,
-               "--trials", str(TRIALS), "--seed", str(seed)]
-        if delta is not None:
+               "--trials", str(args.trials), "--seed", str(seed)]
+        if strategy == "dfo":
             cmd += ["--delta", str(delta)]
         entry["start"] = now()
         log(f"{name}: start (battery {batt['percent']}% {batt['state']}, temps {entry['temperature_start_c']})")

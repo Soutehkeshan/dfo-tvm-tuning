@@ -41,7 +41,7 @@ HOST_TAG = "jetson"
 TARGET = tvm.target.Target(
     {"kind": "llvm", "mtriple": "aarch64-linux-gnu", "mcpu": "cortex-a57", "num-cores": 4}
 )
-STRATEGIES = ("evolutionary", "dfo", "replay-trace")         # replay-trace is random search
+STRATEGIES = ("evolutionary", "dfo")
 STRATEGY = "evolutionary"                                    # default; override with --strategy
 MAX_TRIALS = 64                                              # default trial budget; override with --trials
 TRIALS_PER_ITER = 16                                         # 16 trials per round of search
@@ -280,13 +280,50 @@ def device_state():
     return json.loads([line for line in completed.stdout.splitlines() if line.startswith("{")][-1])
 
 
-def check_device(state, when):
-    """Stop unless 4 cores are online and pinned at the MAXN maximum."""
+def clocks_ok(state):
+    """True if 4 cores are online and pinned at the MAXN maximum."""
 
-    online = {name: cpu for name, cpu in state["cpus"].items() if cpu["online"] == "1"}
-    pinned = all(int(cpu[key]) == MAX_KHZ for cpu in online.values() for key in ("min_khz", "cur_khz", "max_khz"))
-    if len(online) != NUM_CORES or not pinned or "MAXN" not in state["nvpmodel_q"]:
+    online = [cpu for cpu in state["cpus"].values() if cpu["online"] == "1"]
+    pinned = all(int(cpu[key]) == MAX_KHZ for cpu in online for key in ("min_khz", "cur_khz", "max_khz"))
+    return len(online) == NUM_CORES and pinned and "MAXN" in state["nvpmodel_q"]
+
+
+def check_device(state, when):
+    """Stop unless the clocks are pinned."""
+
+    if not clocks_ok(state):
         raise SystemExit(f"Device state check failed {when}: {json.dumps(state, indent=1)}")
+
+
+def rpc_ok():
+    """Return (True, None) if the tracker hands out a working Nano session, else (False, error)."""
+
+    try:
+        remote = RPC_CONFIG.connect_tracker().request(
+            RPC_CONFIG.tracker_key, priority=1, session_timeout=60
+        )
+        exists = remote.cpu(0).exist
+        del remote
+        return bool(exists), None
+    except Exception as error:  # noqa: BLE001
+        return False, repr(error)
+
+
+def checked_state(when):
+    """Check RPC and clocks between runs; re-apply jetson_clocks once, stop if still wrong."""
+
+    ok, error = rpc_ok()
+    if not ok:
+        raise SystemExit(f"RPC unreachable {when}: {error}")
+    state = device_state()
+    if not clocks_ok(state):
+        print(f"clocks or cores wrong {when}, re-applying jetson_clocks once", flush=True)
+        fix = subprocess.run(["ssh", "-o", "BatchMode=yes", ssh_target(), "sudo", "-n", "jetson_clocks"],
+                             capture_output=True, text=True, timeout=60)
+        state = device_state()
+        if fix.returncode != 0 or not clocks_ok(state):
+            raise SystemExit(f"clocks or cores still wrong {when}: {fix.returncode} {fix.stderr.strip()}")
+    return state
 
 
 def frequency_residency(before, after):
