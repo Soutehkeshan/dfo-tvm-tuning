@@ -1,4 +1,4 @@
-"""Convert DFO fly positions to and from MetaSchedule trace decisions.
+"""Convert DFO fly positions to MetaSchedule trace decisions.
 
 Problem size (512x512 matmul, per sketch):
     i tiling : 4 exponents of 2, sum = 9, innermost <= 5  -> 3 free dims, 200 valid
@@ -6,54 +6,12 @@ Problem size (512x512 matmul, per sketch):
     k tiling : 2 exponents of 2, sum = 9, innermost <= 5  -> 1 free dim,    6 valid
     unroll   : 1 categorical index, 0..3                   -> 1 dim,         4 valid
 A fly stores all 11 numbers (4 + 4 + 2 + 1) so movement is simple; repair restores the
-sum constraint, so only 8 are effectively free. The sketch is NOT in the position:
-each group of flies owns one sketch.
+sum constraint, so only 8 are effectively free. All sizes are read from the design-space
+trace. The sketch is NOT in the position: each group of flies owns one sketch.
 """
 import math
 
 import numpy as np
-
-TOTAL_EXP = 9          # 512 = 2**9; derive from the loop extent, don't hard-code later
-MAX_INNER_EXP = 5      # max_innermost_factor = 32 = 2**5; read from the trace instead
-NUM_UNROLL = 4         # candidates in the SampleCategorical instruction
-
-# Default slices for the current workload. Actual layouts are derived from traces.
-I_SLICE = slice(0, 4)
-J_SLICE = slice(4, 8)
-K_SLICE = slice(8, 10)
-UNROLL_IDX = 10
-DIM = 11
-_DEFAULT_LAYOUT_CACHE = None
-
-
-def _default_layout():
-    """The current 512x512 matmul layout, used when no trace is supplied."""
-    tiles = []
-    for tile_slice in (I_SLICE, J_SLICE, K_SLICE):
-        n = tile_slice.stop - tile_slice.start
-        tiles.append({
-            "inst": None,
-            "n": n,
-            "extent": 2**TOTAL_EXP,
-            "total_exp": TOTAL_EXP,
-            "max_inner_factor": 2**MAX_INNER_EXP,
-            "max_inner_exp": MAX_INNER_EXP,
-            "slice": tile_slice,
-            "valid_exponents": _valid_tile_exponents(n, TOTAL_EXP, MAX_INNER_EXP),
-        })
-    return {
-        "tiles": tiles,
-        "categoricals": [{"inst": None, "candidates": tuple(range(NUM_UNROLL)), "index": UNROLL_IDX}],
-        "dim": DIM,
-    }
-
-
-def _get_default_layout():
-    """Build and cache the current workload's default layout once."""
-    global _DEFAULT_LAYOUT_CACHE
-    if _DEFAULT_LAYOUT_CACHE is None:
-        _DEFAULT_LAYOUT_CACHE = _default_layout()
-    return _DEFAULT_LAYOUT_CACHE
 
 
 def _sampling_instructions(trace):
@@ -134,9 +92,8 @@ def describe_space(design_space_trace):
     return {"tiles": tiles, "categoricals": categoricals, "dim": offset}
 
 
-def position_bounds(layout=None):
+def position_bounds(layout):
     """Return low/high vectors for the true encoded domain, independent of fly state."""
-    layout = _get_default_layout() if layout is None else layout
     low = np.zeros(layout["dim"], dtype=float)
     high = np.zeros(layout["dim"], dtype=float)
     for tile in layout["tiles"]:
@@ -147,7 +104,7 @@ def position_bounds(layout=None):
     return low, high
 
 
-def repair_tile(exps, total=TOTAL_EXP, max_inner=MAX_INNER_EXP):
+def repair_tile(exps, total, max_inner):
     """Map one loop's continuous exponents to the NEAREST valid integer tiling.
 
     Valid = non-negative integers, sum == total, last <= max_inner.
@@ -185,9 +142,8 @@ def repair_tile(exps, total=TOTAL_EXP, max_inner=MAX_INNER_EXP):
     return result
 
 
-def repair(position, layout=None):
+def repair(position, layout):
     """Return a valid copy of a whole fly position (tilings plus categories)."""
-    layout = _get_default_layout() if layout is None else layout
     position = np.asarray(position, dtype=float)
     if position.shape != (layout["dim"],):
         raise ValueError(f"Expected position shape {(layout['dim'],)}, got {position.shape}")
@@ -208,9 +164,8 @@ def repair(position, layout=None):
     return repaired
 
 
-def position_to_decisions(position, design_space_trace, layout=None):
+def position_to_decisions(position, design_space_trace, layout):
     """Return a trace with sample decisions replaced by the repaired position."""
-    layout = describe_space(design_space_trace) if layout is None else layout
     trace = getattr(design_space_trace, "trace", design_space_trace)
     tile_insts, categorical_insts, _ = _sampling_instructions(trace)
     if len(tile_insts) != len(layout["tiles"]) or len(categorical_insts) != len(
@@ -231,47 +186,6 @@ def position_to_decisions(position, design_space_trace, layout=None):
     return updated_trace
 
 
-def decisions_to_position(trace, layout=None):
-    """Convert recorded tile factors and categorical decisions to a fly position."""
-    trace = getattr(trace, "trace", trace)
-    layout = describe_space(trace) if layout is None else layout
-    tile_insts, categorical_insts, _ = _sampling_instructions(trace)
-    if len(tile_insts) != len(layout["tiles"]) or len(categorical_insts) != len(
-        layout["categoricals"]
-    ):
-        raise ValueError("Trace sampling instructions do not match the cached layout")
-    position = np.zeros(layout["dim"], dtype=float)
-    for tile, inst in zip(layout["tiles"], tile_insts):
-        factors = trace.get_decision(inst)
-        if factors is None or len(factors) != tile["n"]:
-            raise ValueError("Trace has no complete SamplePerfectTile decision")
-        exponents = []
-        for factor in factors:
-            factor = int(factor)
-            exponent = int(round(np.log2(factor))) if factor > 0 else -1
-            if factor <= 0 or 2**exponent != factor:
-                raise ValueError(f"Tile factor {factor} is not a positive power of two")
-            exponents.append(exponent)
-        if sum(exponents) != tile["total_exp"]:
-            raise ValueError("Tile factors do not match the recorded loop extent")
-        if exponents[-1] > tile["max_inner_exp"]:
-            raise ValueError("Innermost tile factor exceeds its configured maximum")
-        position[tile["slice"]] = exponents
-
-    for categorical, inst in zip(layout["categoricals"], categorical_insts):
-        decision = trace.get_decision(inst)
-        if decision is None:
-            raise ValueError("Trace has no SampleCategorical decision")
-        candidate_idx = int(decision)
-        if not 0 <= candidate_idx < len(categorical["candidates"]):
-            raise ValueError(
-                f"Categorical decision index {candidate_idx} is out of range for "
-                f"{categorical['candidates']}"
-            )
-        position[categorical["index"]] = candidate_idx
-    return position
-
-
 def _valid_tile_exponents(n, total, max_inner):
     """Enumerate bounded exponent compositions for uniform valid-tile sampling."""
     compositions = []
@@ -288,15 +202,11 @@ def _valid_tile_exponents(n, total, max_inner):
     return compositions
 
 
-def random_position(rng, layout=None):
+def random_position(rng, layout):
     """Sample uniformly from valid encoded positions for the described layout."""
-    layout = _get_default_layout() if layout is None else layout
     position = np.zeros(layout["dim"], dtype=float)
     for tile in layout["tiles"]:
-        choices = tile.get("valid_exponents")
-        if choices is None:
-            choices = _valid_tile_exponents(tile["n"], tile["total_exp"], tile["max_inner_exp"])
-            tile["valid_exponents"] = choices
+        choices = tile["valid_exponents"]
         if not choices:
             raise ValueError("No valid tile exponents for the described layout")
         position[tile["slice"]] = choices[int(rng.integers(len(choices)))]
