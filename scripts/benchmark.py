@@ -37,7 +37,7 @@ os.environ["COPYFILE_DISABLE"] = "1"
 # ---------------------------------------------------------------
 N = 512                                                      # matrix size (N x N)
 HOST = "jetson-nano"
-HOST_TAG = "jetson"
+EXPERIMENT = "v2"                                            # results/<experiment>, logs/raw/<experiment>
 TARGET = tvm.target.Target(
     {"kind": "llvm", "mtriple": "aarch64-linux-gnu", "mcpu": "cortex-a57", "num-cores": 4}
 )
@@ -399,7 +399,9 @@ def save_results(results, results_path, max_trials, strategy, seed, delta):
     if strategy == "dfo":
         data["settings"]["DFO"] = {
             "delta": delta,
-            "n_flies": dfo.N_FLIES_PER_GROUP,
+            "n_flies": dfo.N_FLIES,
+            "min_flies_per_group": dfo.MIN_FLIES_PER_GROUP,
+            "top_fraction": dfo.TOP_FRACTION,
             "moves": dfo.MOVES_PER_ROUND,
             "comm_interval": dfo.COMM_INTERVAL,
             "eps_greedy": dfo.EPS_GREEDY,
@@ -416,6 +418,7 @@ if __name__ == "__main__":  # required on macOS: the builder spawns processes
     parser.add_argument("--trials", type=int, default=MAX_TRIALS, help="total trial budget")
     parser.add_argument("--seed", type=int, default=SEED, help="tuning seed")
     parser.add_argument("--delta", type=float, default=DFO_DELTA, help="DFO disturbance threshold")
+    parser.add_argument("--experiment", default=EXPERIMENT, help="folder name for this set of runs")
     parser.add_argument("--output-root", type=Path, default=REPO_DIR,
                         help="folder that receives results/ and logs/raw/ (default: the repo)")
     args = parser.parse_args()
@@ -423,8 +426,8 @@ if __name__ == "__main__":  # required on macOS: the builder spawns processes
         raise SystemExit("--delta applies only to --strategy dfo")
     max_trials = args.trials
     run_name = f"{run_label(args.strategy, args.delta)}_n{N}_t{max_trials}_s{args.seed}"
-    work_dir = args.output_root / "logs/raw" / HOST_TAG / run_name
-    results_path = args.output_root / "results" / HOST_TAG / f"{run_name}.json"
+    work_dir = args.output_root / "logs/raw" / args.experiment / run_name
+    results_path = args.output_root / "results" / args.experiment / f"{run_name}.json"
     if work_dir.exists() or results_path.exists():
         raise SystemExit(
             f"Run already exists: {work_dir} or {results_path}. "

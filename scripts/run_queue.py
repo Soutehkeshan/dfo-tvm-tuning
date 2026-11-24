@@ -20,9 +20,6 @@ sys.path.insert(0, str(REPO / "scripts"))
 import benchmark as bm  # noqa: E402
 
 PY = sys.executable
-RAW = REPO / "logs/raw/jetson"
-QUEUE_LOG = RAW / "queue_log.jsonl"
-STDOUT_DIR = RAW / "queue_stdout"
 UNTUNED_LO, UNTUNED_HI = 815 * 0.95, 840 * 1.05
 
 
@@ -104,24 +101,28 @@ def main():
     parser.add_argument("--seeds", type=parse_seeds, required=True, help='e.g. "0-9" or "0,2,5"')
     parser.add_argument("--delta", type=float, default=bm.DFO_DELTA, help="DFO disturbance threshold")
     parser.add_argument("--trials", type=int, default=1024)
+    parser.add_argument("--experiment", default=bm.EXPERIMENT, help="folder name for this set of runs")
     args = parser.parse_args()
+    raw = REPO / "logs/raw" / args.experiment
+    queue_log = raw / "queue_log.jsonl"
+    stdout_dir = raw / "queue_stdout"
     queue = [(strategy, seed, args.delta if strategy == "dfo" else bm.DFO_DELTA)
              for seed in args.seeds for strategy in args.strategies]
 
-    STDOUT_DIR.mkdir(parents=True, exist_ok=True)
+    stdout_dir.mkdir(parents=True, exist_ok=True)
     skipped, stop_reason, prev_batt = [], None, None
     log(f"queue of {len(queue)} runs")
     for index, (strategy, seed, delta) in enumerate(queue):
         name = run_name(strategy, seed, delta, args.trials)
-        work_dir = RAW / name
-        result_path = REPO / "results/jetson" / f"{name}.json"
+        work_dir = raw / name
+        result_path = REPO / "results" / args.experiment / f"{name}.json"
         entry = {"run": name, "index": index}
 
         if work_dir.exists() or result_path.exists():
             log(f"{name}: already exists, not overwriting")
             entry.update(status="skipped-exists", start=now(), end=now())
             skipped.append((name, "already exists"))
-            with QUEUE_LOG.open("a") as f:
+            with queue_log.open("a") as f:
                 f.write(json.dumps(entry) + "\n")
             continue
 
@@ -142,13 +143,13 @@ def main():
         entry["temperature_start_c"] = temperature(state)
 
         cmd = [PY, str(REPO / "scripts/benchmark.py"), "--strategy", strategy,
-               "--trials", str(args.trials), "--seed", str(seed)]
+               "--trials", str(args.trials), "--seed", str(seed), "--experiment", args.experiment]
         if strategy == "dfo":
             cmd += ["--delta", str(delta)]
         entry["start"] = now()
         log(f"{name}: start (battery {batt['percent']}% {batt['state']}, temps {entry['temperature_start_c']})")
         t0 = time.monotonic()
-        with open(STDOUT_DIR / f"{name}.log", "w") as out:
+        with open(stdout_dir / f"{name}.log", "w") as out:
             proc = subprocess.run(cmd, cwd=REPO, stdout=out, stderr=subprocess.STDOUT)
         entry["end"] = now()
         entry["wall_seconds"] = round(time.monotonic() - t0, 1)
@@ -168,11 +169,11 @@ def main():
         if proc.returncode == 0:
             entry["status"] = "ok"
         else:
-            tail = (STDOUT_DIR / f"{name}.log").read_text(errors="replace").splitlines()[-15:]
+            tail = (stdout_dir / f"{name}.log").read_text(errors="replace").splitlines()[-15:]
             entry["status"] = "failed"
             entry["error_tail"] = tail
             skipped.append((name, tail[-1] if tail else f"exit {proc.returncode}"))
-        with QUEUE_LOG.open("a") as f:
+        with queue_log.open("a") as f:
             f.write(json.dumps(entry) + "\n")
         log(f"{name}: {entry['status']} in {entry['wall_seconds']} s, untuned {entry.get('untuned_ms')}, "
             f"best@1024 {entry['db_best_1024_ms']}, build failures {entry.get('build_failures')}, "
@@ -184,7 +185,7 @@ def main():
 
     if stop_reason:
         log(f"QUEUE STOPPED: {stop_reason}")
-        with QUEUE_LOG.open("a") as f:
+        with queue_log.open("a") as f:
             f.write(json.dumps({"queue_stopped": stop_reason, "time": now()}) + "\n")
     else:
         log("queue finished")

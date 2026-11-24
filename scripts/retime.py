@@ -1,11 +1,12 @@
 """Re-time the best schedule of each finished run at fixed trial checkpoints, on the Jetson.
 
-For every results/jetson/*_n512_t1024_s*.json run, take the best valid database record among
+For every results/<experiment>/*_n512_t1024_s*.json run, take the best valid database record among
 the first k trials (k = 112, 256, 512, 768, 1024) and time it again with benchmark.py's final
 timing (REPEATS x NUMBER, median). The untuned baseline is timed several times at the start
-and end. Output goes to results/jetson/retime/; existing files are never overwritten, so a
+and end. Output goes to results/<experiment>/retime/; existing files are never overwritten, so a
 stopped re-timing can be restarted with the same command.
 """
+import argparse
 import datetime as dt
 import json
 import statistics
@@ -21,9 +22,7 @@ from tvm.s_tir import meta_schedule as ms  # noqa: E402
 
 CHECKPOINTS = (112, 256, 512, 768, 1024)
 UNTUNED_START, UNTUNED_END = 3, 2
-RESULTS = REPO / "results" / bm.HOST_TAG
-RAW = REPO / "logs/raw" / bm.HOST_TAG
-OUT = RESULTS / "retime"
+RESULTS = RAW = OUT = None                                    # set from --experiment in main()
 
 
 def now():
@@ -96,6 +95,13 @@ def run_order():
 
 
 def main():
+    global RESULTS, RAW, OUT
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--experiment", default=bm.EXPERIMENT, help="folder name of the runs to re-time")
+    experiment = parser.parse_args().experiment
+    RESULTS = REPO / "results" / experiment
+    RAW = REPO / "logs/raw" / experiment
+    OUT = RESULTS / "retime"
     OUT.mkdir(parents=True, exist_ok=True)
     func = bm.make_matmul(bm.N)
     bm.check_design_spaces(func)
