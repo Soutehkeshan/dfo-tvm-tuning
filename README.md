@@ -53,3 +53,18 @@ For the results, see the [v2.0 release](https://github.com/Soutehkeshan/dfo-tvm-
 - Apache TVM `v0.27.0.post1` (commit `7b5acb32bd271342a24130f4ef439ff6c2e52c6c`), built from source with LLVM
 - LLVM 23.1.4 and libomp (Homebrew), Python 3.12.11, macOS 27.0.1 (arm64)
 - Jetson Nano: TVM RPC runtime at the same version, MAXN power mode with `jetson_clocks`
+
+## Declaration of AI use
+
+I used Claude (Anthropic) as a technical assistant, within the module's AI rules. It helped with:
+
+- **Reasoning:** breaking down the problem, discussing design choices and checking them against TVM's source.
+- **Code review:** finding bugs in my DFO code and applying changes I specified.
+- **Jetson Nano:** setting up remote measurement over TVM RPC.
+- **Experiments:** queuing and monitoring the overnight runs.
+- **Presentation:** drafting this video's slides and script.
+
+I designed and implemented DFO, chose the experiments and interpreted the results.
+
+## Module Leader
+Dr Mohammad Majid al-Rifaie
