@@ -3,6 +3,9 @@
 Dispersive Flies Optimisation (DFO) as a search strategy for Apache TVM's MetaSchedule,
 compared with its default evolutionary search on a Jetson Nano.
 
+## Video
+[![Project video](https://img.youtube.com/vi/D9dKwpW7HUE/hqdefault.jpg)](https://youtu.be/D9dKwpW7HUE)
+
 ## How DFO searches
 - Each fly holds 11 whole numbers: base-2 exponents of the tile sizes of loops i, j and k,
   plus an index into the unroll limits. A repair step keeps every position a valid program.
@@ -39,6 +42,8 @@ ssh -N -L 9190:127.0.0.1:9190 -L 9090:127.0.0.1:9090 "$JETSON_SSH" &
 `JETSON_TVM_PYTHON` sets the Nano's TVM Python if it is not `~/.local/envs/tvm-rpc/bin/python`.
 
 ## Releases
+For the results, see the [v2.0 release](https://github.com/Soutehkeshan/dfo-tvm-tuning/releases/tag/v2.0).
+
 - `v1.0`: first study. Fixed groups of 64 flies per sketch, several values of δ, against
   evolutionary search and random sampling (68 runs).
 - `v2.0`: second study. Shared flies, equal screening, δ = 0.05, against evolutionary
