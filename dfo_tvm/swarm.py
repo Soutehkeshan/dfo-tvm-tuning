@@ -10,10 +10,9 @@ class FlyGroup:
         fitness   : (n_flies,) float; minimised, so lower is better
     """
 
-    def __init__(self, sketch_id, n_flies, dim, delta, rng, low, high):
+    def __init__(self, n_flies, dim, delta, rng, low, high):
         """Store settings; positions and fitness stay None until initialise()."""
 
-        self.sketch_id = sketch_id
         if n_flies < 3:
             raise ValueError(f"n_flies must be >= 3, got {n_flies}")
         self.n_flies = n_flies
@@ -32,7 +31,7 @@ class FlyGroup:
         self.fitness = None
 
     def initialise(self, init_positions):
-        """Set positions (random valid positions, or seeded from good records) and reset every fly's fitness to unscored."""
+        """Set every fly's position and mark all flies as unscored."""
 
         self.positions = np.array(init_positions, dtype=float)
         if self.positions.shape != (self.n_flies, self.dim):

@@ -1,7 +1,7 @@
 """Run a queue of Jetson tuning runs one at a time, with per-run device checks.
 
 Strategies alternate within each seed, so slow drift on the device hits both alike:
-    python scripts/run_queue.py --seeds 0-9 --delta 0.05
+    python scripts/run_queue.py --seeds 0-9
 Finished runs are skipped, so the same command resumes a stopped queue.
 """
 import argparse
@@ -20,7 +20,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 import benchmark as bm  # noqa: E402
 
 PY = sys.executable
-UNTUNED_LO, UNTUNED_HI = 815 * 0.95, 840 * 1.05
+UNTUNED_LO, UNTUNED_HI = 815 * 0.95, 840 * 1.05      # flag untuned times outside the usual range
 
 
 def parse_seeds(text):

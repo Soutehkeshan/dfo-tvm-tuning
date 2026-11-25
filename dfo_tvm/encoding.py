@@ -37,8 +37,8 @@ def describe_space(design_space_trace):
 
     Tile extent is inferred from the product of its recorded perfect-tile decision;
     the trace stores the sampling instruction's loop RV but not that loop's extent.
-    The returned layout records instruction, tile constraints, position slices, and
-    categorical candidates in trace order.
+    The returned layout records tile constraints, position slices, and categorical
+    candidates in trace order.
     """
     trace = getattr(design_space_trace, "trace", design_space_trace)
     tiles = []
@@ -63,7 +63,6 @@ def describe_space(design_space_trace):
                 raise ValueError(f"Tile extent {extent} is not a power of two")
             max_inner_exp = int(math.floor(math.log2(max_inner_factor)))
             tiles.append({
-                "inst": inst,
                 "n": n,
                 "extent": extent,
                 "total_exp": total_exp,
@@ -82,7 +81,7 @@ def describe_space(design_space_trace):
                 raise ValueError(
                     f"Invalid SampleCategorical decision {decision} for candidates {candidates}"
                 )
-            categoricals.append({"inst": inst, "candidates": candidates, "index": offset})
+            categoricals.append({"candidates": candidates, "index": offset})
             offset += 1
 
     if not tiles:

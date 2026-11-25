@@ -9,11 +9,10 @@ B = te.placeholder((n,), name="B", dtype="float32")
 C = te.compute((n,), lambda i: A[i] + B[i], name="C")
 func = te.create_prim_func([A, B, C])
 
-build = getattr(tvm, "compile", None) or tvm.build
-lib = build(func, target="llvm")
+lib = tvm.compile(func, target="llvm")
 
 dev = tvm.cpu()
-to_dev = getattr(tvm.runtime, "tensor", None) or tvm.nd.array
+to_dev = tvm.runtime.tensor
 a_np = np.random.rand(n).astype("float32")
 b_np = np.random.rand(n).astype("float32")
 a, b = to_dev(a_np, dev), to_dev(b_np, dev)

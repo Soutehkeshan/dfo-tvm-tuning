@@ -52,16 +52,15 @@ REPEATS = 20                                                 # number of timing 
 NUMBER = 10                                                  # runs averaged within each timing sample
 
 # Space: the target's default rules. This target has the arm_cpu key and asimd, so
-# "from-target" resolves to the ARM NEON rules, the same rules the Mac runs used.
+# "from-target" resolves to the ARM NEON rules.
 SPACE_SETTINGS = {"sch_rules": "from-target", "postprocs": "from-target", "mutator_probs": "from-target"}
 
-# Tuning measurements. These are the EvaluatorConfig defaults the Mac LocalRunner used;
-# identical for every strategy.
+# Tuning measurements: MetaSchedule's EvaluatorConfig defaults, identical for every strategy.
 EVALUATOR_CONFIG = ms.runner.EvaluatorConfig(
     number=3, repeat=1, min_repeat_ms=100, enable_cpu_cache_flush=False
 )
 RPC_CONFIG = ms.runner.RPCConfig(
-    tracker_host="127.0.0.1",                                # forwarded to the Nano over Tailscale
+    tracker_host="127.0.0.1",                                # forwarded to the Nano over SSH
     tracker_port=9190,
     tracker_key="jetson-nano",
     session_priority=1,
@@ -91,7 +90,7 @@ def make_space():
 
 def check_design_spaces(func):
     """Print the resolved rules and every sketch's sampling instructions; stop unless the
-    layout matches the Mac. Returns the resolved rule lists for the result JSON."""
+    layout is the expected one. Returns the resolved rule lists for the result JSON."""
 
     context = ms.TuneContext(
         mod=tvm.IRModule({"main": func}),
@@ -140,7 +139,7 @@ def check_design_spaces(func):
     if len(spaces) != 3:
         problems.append(f"expected 3 sketches, got {len(spaces)}")
     if problems:
-        raise SystemExit("Design space differs from the Mac layout:\n  " + "\n  ".join(problems))
+        raise SystemExit("Design space differs from the expected layout:\n  " + "\n  ".join(problems))
     print("design spaces match: 3 sketches; i and j 200 valid tilings each (innermost <= 32), "
           "k 6, one 4-way unroll")
     return resolved
@@ -161,7 +160,7 @@ def time_module(lib, n):
         session.upload(str(archive))
         mod = session.load_module(archive.name)
 
-    to_dev = getattr(tvm.runtime, "tensor", None) or tvm.nd.array
+    to_dev = tvm.runtime.tensor
     rng = np.random.default_rng(DATA_SEED)
     a_np = rng.random((n, n), dtype=np.float32)
     b_np = rng.random((n, n), dtype=np.float32)
@@ -179,7 +178,7 @@ def time_module(lib, n):
 
 
 def time_untuned(func):
-    """Compile with no tuning and return its runtime (ms). This is your floor."""
+    """Compile with no tuning and return its runtime (ms), the baseline for speedups."""
 
     lib = tvm.compile(func, target=TARGET)
     return time_module(lib, N)
@@ -419,15 +418,13 @@ if __name__ == "__main__":  # required on macOS: the builder spawns processes
     parser.add_argument("--seed", type=int, default=SEED, help="tuning seed")
     parser.add_argument("--delta", type=float, default=DFO_DELTA, help="DFO disturbance threshold")
     parser.add_argument("--experiment", default=EXPERIMENT, help="folder name for this set of runs")
-    parser.add_argument("--output-root", type=Path, default=REPO_DIR,
-                        help="folder that receives results/ and logs/raw/ (default: the repo)")
     args = parser.parse_args()
     if args.strategy != "dfo" and args.delta != DFO_DELTA:
         raise SystemExit("--delta applies only to --strategy dfo")
     max_trials = args.trials
     run_name = f"{run_label(args.strategy, args.delta)}_n{N}_t{max_trials}_s{args.seed}"
-    work_dir = args.output_root / "logs/raw" / args.experiment / run_name
-    results_path = args.output_root / "results" / args.experiment / f"{run_name}.json"
+    work_dir = REPO_DIR / "logs/raw" / args.experiment / run_name
+    results_path = REPO_DIR / "results" / args.experiment / f"{run_name}.json"
     if work_dir.exists() or results_path.exists():
         raise SystemExit(
             f"Run already exists: {work_dir} or {results_path}. "

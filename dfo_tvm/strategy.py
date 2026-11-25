@@ -29,7 +29,7 @@ MIN_FLIES_PER_GROUP = 16
 TOP_FRACTION = 0.1          # share of a round's predictions that counts as a hit
 MOVES_PER_ROUND = 10        # cost-model-scored DFO steps between real measurements
 DELTA = 0.05                # disturbance threshold
-COMM_INTERVAL = 5           # moves between group communication (fixed, budget-free)
+COMM_INTERVAL = 5           # moves between sharing the best fly across groups
 EPS_GREEDY = 0.05
 
 
@@ -154,7 +154,7 @@ class DFOSearch(PySearchStrategy):
                     group.fitness[fly_idx] = np.inf
                     continue
                 candidates.append(candidate)
-                owners.append((sketch_id, fly_idx, position.copy()))
+                owners.append((sketch_id, fly_idx))
 
         if not candidates:
             return 0
@@ -167,28 +167,22 @@ class DFOSearch(PySearchStrategy):
 
         valid_count = 0
         for candidate, owner, score in zip(candidates, owners, scores):
-            sketch_id, fly_idx, position = owner
+            sketch_id, fly_idx = owner
             self._round_scores.append((float(score), sketch_id))
             if np.isfinite(score):
                 self.groups[sketch_id].fitness[fly_idx] = -float(score)
-                self._add_round_candidate(float(score), candidate, position, sketch_id)
+                self._add_round_candidate(float(score), candidate)
                 valid_count += 1
             else:
                 self.groups[sketch_id].fitness[fly_idx] = np.inf
         return valid_count
 
-    def _add_round_candidate(self, score, candidate, position, sketch_id):
+    def _add_round_candidate(self, score, candidate):
         """Keep the highest-scoring unique candidates that have not been measured."""
         mod = candidate.sch.mod
         if self._module_is_known(mod):
             return
-        new_entry = {
-            "score": score,
-            "candidate": candidate,
-            "position": position,
-            "sketch_id": sketch_id,
-            "mod": mod,
-        }
+        new_entry = {"score": score, "candidate": candidate, "mod": mod}
         mod_hash = self._module_hash(mod)
         bucket = self._round_candidate_modules.setdefault(mod_hash, [])
         if any(tvm_ffi.structural_equal(mod, other) for other in bucket):
@@ -265,7 +259,6 @@ class DFOSearch(PySearchStrategy):
                 dtype=float,
             )
             group = swarm.FlyGroup(
-                sketch_id=sketch_id,
                 n_flies=sizes[sketch_id],
                 dim=layout["dim"],
                 delta=self.delta,
@@ -318,13 +311,13 @@ class DFOSearch(PySearchStrategy):
             )
         hit_rates = self._hit_rates()
 
-        self._round_best_candidates = sorted(
+        round_best = sorted(
             self._round_candidate_pool,
             key=lambda entry: entry["score"],
             reverse=True,
         )[:best_count]
         selected = []
-        for entry in self._round_best_candidates:
+        for entry in round_best:
             if self._remember_module(entry["mod"]):
                 selected.append(entry["candidate"])
         swarm_chosen = len(selected)
@@ -341,7 +334,7 @@ class DFOSearch(PySearchStrategy):
             selected.append(candidate)
 
         best_score = max(
-            (entry["score"] for entry in self._round_best_candidates), default=None
+            (entry["score"] for entry in round_best), default=None
         )
         random_filled = len(selected) - swarm_chosen
         self.round_logs.append({
